@@ -1,0 +1,94 @@
+name: "GHAS Multi-Language CodeQL Scan with Report"
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 0 * * 0'
+  workflow_dispatch:
+
+jobs:
+  analyze:
+    name: CodeQL Scan for ${{ matrix.language }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: actions
+            build-mode: none
+          - language: ruby
+            build-mode: none
+          - language: swift
+            build-mode: autobuild
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v3
+      with:
+        languages: ${{ matrix.language }}
+
+    - name: Autobuild (if applicable)
+      if: matrix.build-mode == 'autobuild'
+      uses: github/codeql-action/autobuild@v3
+
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v3
+      with:
+        output: sarif-results
+
+    - name: Generate Markdown Report
+      run: |
+        echo "📝 Generating GHAS report..."
+
+        unzip -o sarif-results/codeql.sarif.zip -d sarif-results
+        SARIF_FILE=$(find sarif-results -name "*.sarif" | head -n 1)
+
+        {
+          echo "# 🔍 GHAS Executive Summary for \`${{ matrix.language }}\`"
+          FILE_COUNT=$(find . -type f -name "*.${{ matrix.language }}" | wc -l || echo 0)
+          LINE_COUNT=$(find . -type f -name "*.${{ matrix.language }}" -exec cat {} + | wc -l || echo 0)
+          echo "- Source Files: $FILE_COUNT"
+          echo "- Total Lines: $LINE_COUNT"
+
+          echo ""
+          echo "## 📊 Issue Category Breakdown"
+          jq -r '.runs[].results[]?.ruleId' "$SARIF_FILE" | sort | uniq -c | sort -nr | awk '{ print "- " $2 ": " $1 " issues" }'
+
+          echo ""
+          echo "## 🧾 Detailed Findings"
+          jq -r '
+            .runs[].results[] |
+            {
+              ruleId: .ruleId,
+              message: .message.text,
+              file: .locations[0].physicalLocation.artifactLocation.uri,
+              line: .locations[0].physicalLocation.region.startLine,
+              snippet: .locations[0].physicalLocation.region.snippet.text,
+              explanation: .partialFingerprints?.explanation?,
+              remediation: .partialFingerprints?.remediation?
+            } |
+            "### 🔹 Rule: \(.ruleId)\n- **File:** \(.file):\(.line)\n- **Finding:** \(.message)\n- **Code Snippet:**\n\`\`\`\n\(.snippet)\n\`\`\`\n- **Explanation:** \(.explanation // "N/A")\n- **Remediation:** \(.remediation // "N/A")\n"
+          ' "$SARIF_FILE"
+        } > ghas-report-${{ matrix.language }}.md
+
+    - name: Upload Markdown Report
+      uses: actions/upload-artifact@v4
+      with:
+        name: GHAS-Report-${{ matrix.language }}
+        path: ghas-report-${{ matrix.language }}.md
+
+    - name: Post Summary with Download Link
+      run: |
+        echo "## ✅ GHAS Scan Completed for \`${{ matrix.language }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "- [Download GHAS Report](./artifacts/GHAS-Report-${{ matrix.language }}/ghas-report-${{ matrix.language }}.md)" >> $GITHUB_STEP_SUMMARY
