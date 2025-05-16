@@ -1,22 +1,12 @@
-name: "GHAS Multi-Language CodeQL Scan with Report"
+name: GHAS with HTML Report
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
-  schedule:
-    - cron: '0 0 * * 0' # Weekly scan
-  workflow_dispatch:
+  workflow_dispatch:  # Manual trigger
 
 jobs:
-  analyze:
-    name: CodeQL Scan for ${{ matrix.language }}
-    runs-on: ubuntu-latest
-    permissions:
-      actions: read
-      contents: read
-      security-events: write
+  codeql-analysis:
+    name: CodeQL Analysis
+    runs-on: macos-latest  # For Swift projects
 
     strategy:
       fail-fast: false
@@ -30,64 +20,83 @@ jobs:
             build-mode: autobuild
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Initialize CodeQL
-      uses: github/codeql-action/init@v3
-      with:
-        languages: ${{ matrix.language }}
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
 
-    - name: Autobuild (if applicable)
-      if: matrix.build-mode == 'autobuild'
-      uses: github/codeql-action/autobuild@v3
+      - name: Autobuild
+        if: matrix.build-mode == 'autobuild'
+        uses: github/codeql-action/autobuild@v3
 
-    - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@v3
-      with:
-        category: "/language:${{matrix.language}}"
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          output: sarif-results
+          category: '/language:${{ matrix.language }}'
 
-    - name: Generate Markdown Report
-      run: |
-        echo "📝 Generating GHAS report..."
+      - name: Generate HTML Report
+        run: |
+          echo "📄 Generating GHAS HTML report..."
 
-        SARIF_FILE=$(find . -name "*.sarif" | head -n 1)
+          SARIF_FILE=$(find sarif-results -name "*.sarif" | head -n 1)
 
-        {
-          echo "# 🔍 GHAS Executive Summary for \`${{ matrix.language }}\`"
-          FILE_COUNT=$(find . -type f -name "*.${{ matrix.language }}" | wc -l || echo 0)
-          LINE_COUNT=$(find . -type f -name "*.${{ matrix.language }}" -exec cat {} + | wc -l || echo 0)
-          echo "- Source Files: $FILE_COUNT"
-          echo "- Total Lines: $LINE_COUNT"
-          echo ""
+          {
+            echo "<!DOCTYPE html><html><head><meta charset='UTF-8'><title>GHAS Report - ${{ matrix.language }}</title>"
+            echo "<style>
+              body { font-family: Arial, sans-serif; padding: 20px; }
+              h1, h2, h3 { color: #2c3e50; }
+              pre { background: #f4f4f4; padding: 10px; border: 1px solid #ccc; white-space: pre-wrap; }
+              .issue { border: 1px solid #ddd; padding: 10px; margin-bottom: 15px; border-radius: 5px; }
+            </style></head><body>"
 
-          echo "## 📊 Issue Category Breakdown"
-          jq -r '.runs[].results[]?.ruleId' "$SARIF_FILE" | sort | uniq -c | sort -nr | awk '{ print "- " $2 ": " $1 " issues" }'
-          echo ""
+            echo "<h1>🔍 GHAS Executive Summary for <code>${{ matrix.language }}</code></h1>"
 
-          echo "## 🧾 Detailed Findings"
-          jq -r '
-            .runs[].results[] |
-            {
-              ruleId: .ruleId,
-              message: .message.text,
-              file: .locations[0].physicalLocation.artifactLocation.uri,
-              line: .locations[0].physicalLocation.region.startLine,
-              snippet: .locations[0].physicalLocation.region.snippet.text,
-              explanation: .partialFingerprints?.explanation?,
-              remediation: .partialFingerprints?.remediation?
-            } |
-            "### 🔹 Rule: \(.ruleId)\n- **File:** \(.file):\(.line)\n- **Finding:** \(.message)\n- **Code Snippet:**\n\`\`\`\n\(.snippet // "N/A")\n\`\`\`\n- **Explanation:** \(.explanation // "N/A")\n- **Remediation:** \(.remediation // "N/A")\n"
-          ' "$SARIF_FILE"
-        } > ghas-report-${{ matrix.language }}.md
+            FILE_COUNT=$(find . -type f -name "*.${{ matrix.language }}" | wc -l || echo 0)
+            LINE_COUNT=$(find . -type f -name "*.${{ matrix.language }}" -exec cat {} + | wc -l || echo 0)
+            echo "<ul>"
+            echo "<li><strong>Source Files:</strong> $FILE_COUNT</li>"
+            echo "<li><strong>Total Lines:</strong> $LINE_COUNT</li>"
+            echo "</ul>"
 
-    - name: Upload Markdown Report
-      uses: actions/upload-artifact@v4
-      with:
-        name: GHAS-Report-${{ matrix.language }}
-        path: ghas-report-${{ matrix.language }}.md
+            echo "<h2>📊 Issue Category Breakdown</h2><ul>"
+            jq -r '.runs[].results[]?.ruleId' "$SARIF_FILE" | sort | uniq -c | sort -nr | \
+              awk '{ print "<li>" $2 ": " $1 " issues</li>" }'
+            echo "</ul>"
 
-    - name: Post Summary with Download Link
-      run: |
-        echo "## ✅ GHAS Scan Completed for \`${{ matrix.language }}\`" >> $GITHUB_STEP_SUMMARY
-        echo "- 📄 [Download GHAS Report Artifact](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})" >> $GITHUB_STEP_SUMMARY
+            echo "<h2>🧾 Detailed Findings</h2>"
+            jq -r '
+              .runs[].results[] |
+              [
+                .ruleId,
+                .message.text,
+                .locations[0].physicalLocation.artifactLocation.uri,
+                .locations[0].physicalLocation.region.startLine,
+                .locations[0].physicalLocation.region.snippet.text,
+                .partialFingerprints.explanation // "N/A",
+                .partialFingerprints.remediation // "N/A"
+              ] |
+              @tsv
+            ' "$SARIF_FILE" | while IFS=$'\t' read -r ruleId message file line snippet explanation remediation; do
+                echo "<div class='issue'>"
+                echo "<h3>🔹 Rule: $ruleId</h3>"
+                echo "<p><strong>File:</strong> $file:$line</p>"
+                echo "<p><strong>Finding:</strong> $message</p>"
+                echo "<p><strong>Code Snippet:</strong></p><pre>${snippet}</pre>"
+                echo "<p><strong>Explanation:</strong> $explanation</p>"
+                echo "<p><strong>Remediation:</strong> $remediation</p>"
+                echo "</div>"
+            done
+
+            echo "</body></html>"
+          } > ghas-report-${{ matrix.language }}.html
+
+      - name: Upload HTML Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: GHAS-Report-${{ matrix.language }}
+          path: ghas-report-${{ matrix.language }}.html
